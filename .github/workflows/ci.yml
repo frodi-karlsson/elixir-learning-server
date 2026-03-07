@@ -125,7 +125,7 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.5
         with:
-          version: v0.57.1
+          version: v0.69.2
           cache: true
 
       - name: Run Trivy vulnerability scanner
