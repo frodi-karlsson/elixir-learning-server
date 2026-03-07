@@ -229,11 +229,11 @@ defmodule Webserver.Parser do
     end
   end
 
-  defp resolve_asset(path, %ParseInput{} = _parse_input) do
+  defp resolve_asset(path, %ParseInput{} = parse_input) do
     if Application.get_env(:webserver, :live_reload, false) do
       {:ok, path}
     else
-      case Webserver.AssetServer.resolve(path) do
+      case parse_input.asset_resolver.resolve(path) do
         {:ok, resolved} -> {:ok, resolved}
         {:error, :not_found} -> {:error, {:unresolved_asset, path}}
       end

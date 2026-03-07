@@ -21,7 +21,7 @@ defmodule Webserver.Parser.Img do
          {:ok, alt} <- fetch_attr(attrs, "alt"),
          :ok <- validate_image_src(src),
          {:ok, resolved_src} <- resolve_asset(src, parse_input),
-         {:ok, {width, height}} <- resolve_image_meta(src) do
+         {:ok, {width, height}} <- resolve_image_meta(src, parse_input) do
       decoding = Map.get(attrs, "decoding", "async")
       loading = Map.get(attrs, "loading")
       class = Map.get(attrs, "class")
@@ -69,8 +69,8 @@ defmodule Webserver.Parser.Img do
     end
   end
 
-  defp resolve_image_meta(src) when is_binary(src) do
-    case Webserver.AssetServer.resolve_meta(src) do
+  defp resolve_image_meta(src, %ParseInput{} = parse_input) when is_binary(src) do
+    case parse_input.asset_resolver.resolve_meta(src) do
       {:ok, %{width: width, height: height}} when is_integer(width) and is_integer(height) ->
         {:ok, {width, height}}
 
@@ -79,11 +79,11 @@ defmodule Webserver.Parser.Img do
     end
   end
 
-  defp resolve_asset(path, %ParseInput{} = _parse_input) do
+  defp resolve_asset(path, %ParseInput{} = parse_input) do
     if Application.get_env(:webserver, :live_reload, false) do
       {:ok, path}
     else
-      case Webserver.AssetServer.resolve(path) do
+      case parse_input.asset_resolver.resolve(path) do
         {:ok, resolved} -> {:ok, resolved}
         {:error, :not_found} -> {:error, {:unresolved_asset, path}}
       end
@@ -157,7 +157,7 @@ defmodule Webserver.Parser.Img do
     |> Enum.map_join(", ", fn {url, w} -> "#{url} #{w}w" end)
   end
 
-  defp resolve_asset_for_srcset(path, %ParseInput{} = _parse_input) when is_binary(path) do
+  defp resolve_asset_for_srcset(path, %ParseInput{} = parse_input) when is_binary(path) do
     if Application.get_env(:webserver, :live_reload, false) do
       if static_file_exists?(path) do
         {:ok, path}
@@ -165,7 +165,7 @@ defmodule Webserver.Parser.Img do
         :error
       end
     else
-      case Webserver.AssetServer.resolve(path) do
+      case parse_input.asset_resolver.resolve(path) do
         {:ok, resolved} -> {:ok, resolved}
         {:error, :not_found} -> :error
       end

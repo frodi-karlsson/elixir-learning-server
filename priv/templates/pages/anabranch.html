@@ -1,0 +1,197 @@
+---
+title: Anabranch: Error-Tolerant Async Streams for TypeScript
+date: 2026-03-07
+category: TypeScript
+summary: A look at the anabranch library ecosystem for async stream processing where errors flow alongside successes instead of killing the pipeline.
+canonical: https://blog.frodikarlsson.com/anabranch
+---
+<% layout.html %>
+  <slot:title>Anabranch: Error-Tolerant Async Streams for TypeScript</slot:title>
+  <slot:description>A look at the anabranch library ecosystem for async stream processing where errors flow alongside successes instead of killing the pipeline.</slot:description>
+  <slot:og_type>article</slot:og_type>
+  <slot:body>
+    <% blog_post.html %>
+      <slot:category>TypeScript</slot:category>
+      <slot:date>Mar 7, 2026</slot:date>
+      <slot:title>Anabranch: Error-Tolerant Async Streams for TypeScript</slot:title>
+      <slot:content>
+        <p><a href="https://github.com/frodi-karlsson/anabranch" target="_blank" rel="noopener noreferrer">Anabranch</a> is a TypeScript library for async stream processing where errors don't kill the pipeline. Instead of a single thrown exception stopping everything, errors flow alongside successes as tagged results: <code>{ type: "success", value }</code> or <code>{ type: "error", error }</code>. The pipeline runs to completion and you decide what to do with the errors at the end.</p>
+
+        <p>The name comes from hydrology. An anabranch is a branch of a river that diverges from the main channel and may rejoin it later. This is how I envisioned the package to work: errors branch off from the success path but don't block it, get collected alongside successes, and are handled wherever you choose.</p>
+
+        <h2>The Problem</h2>
+        <p>When processing a collection of items asynchronously, a single failure kills the loop. The typical fix is a per-item try/catch, which quickly turns the logic inside out:</p>
+
+        <pre><code class="language-typescript">const results = [];
+const failures = [];
+
+for (const id of ids) {
+  try {
+    const user = await fetchUser(id);
+    results.push(transform(user));
+  } catch (err) {
+    failures.push({ id, err });
+  }
+}</code></pre>
+
+        <p>Now imagine two more transformations, each of which can fail:</p>
+
+        <pre><code class="language-typescript">for (const id of ids) {
+  try {
+    const user = await fetchUser(id);
+    let enriched;
+    try {
+      enriched = await enrich(user);
+    } catch (err) {
+      failures.push({ id, err });
+      continue;
+    }
+    try {
+      results.push(await transform(enriched));
+    } catch (err) {
+      failures.push({ id, err });
+    }
+  } catch (err) {
+    failures.push({ id, err });
+  }
+}</code></pre>
+
+        <p>What I wanted instead was a composable pipeline where errors are just another value, one that doesn't derail the whole thing:</p>
+
+        <pre><code class="language-typescript">import { Source } from "@anabranch/anabranch";
+
+const { successes, errors } = await Source.from(async function* () {
+  for (const id of ids) yield id;
+})
+  .map((id) =&gt; fetchUser(id))
+  .map((user) =&gt; transform(user))
+  .partition();
+
+console.log(`${successes.length} processed, ${errors.length} failed`);</code></pre>
+
+        <p>Both pipelines do the same thing (collect successes and accumulate failures), but the second one stays flat and composable no matter how many steps you add.</p>
+
+        <h2>Source and Stream</h2>
+        <p><code>Source</code> is the entry point. It wraps an async generator: each <code>yield</code> becomes a success result, and any thrown error becomes a single error result. From a <code>Source</code> you get a <code>Stream</code>, which is where the pipeline API lives.</p>
+
+        <p>A <code>Stream</code> is an <code>AsyncIterable&lt;Result&lt;T, E&gt;&gt;</code> with about 25 chainable methods: <code>map</code>, <code>flatMap</code>, <code>filter</code>, <code>fold</code>, <code>scan</code>, <code>take</code>, <code>chunks</code>, and more. Terminal operations like <code>collect()</code>, <code>toArray()</code>, <code>successes()</code>, and <code>partition()</code> consume the stream and return a promise. Everything is lazy: nothing runs until you call a terminal operation.</p>
+
+        <h2>Dual-Channel Operations</h2>
+        <p>Every success-side operation has an error-side counterpart. <code>map</code> has <code>mapErr</code>. <code>filter</code> has <code>filterErr</code>. <code>tap</code> has <code>tapErr</code>. On top of those, there are recovery operations: <code>recover</code> converts any error into a success value, and <code>recoverWhen</code> lets you target a specific error type while leaving others untouched. The type system tracks this: after a <code>recover()</code>, the error type collapses to <code>never</code>:</p>
+
+        <pre><code class="language-typescript">import { Source } from "@anabranch/anabranch";
+import type { NetworkError, ParseError } from "./errors.ts";
+
+const results = await Source.from&lt;string, NetworkError | ParseError&gt;(fetchItems)
+  .map((item) =&gt; parse(item))
+  .mapErr((err) =&gt; ({ ...err, context: "item pipeline" }))
+  .recoverWhen(
+    (err): err is ParseError =&gt; err instanceof ParseError,
+    (_err) =&gt; null,           // replace parse errors with null
+  )
+  .filter((v) =&gt; v !== null)  // drop nulls, TypeScript knows v is not null
+  .collect();                  // Stream&lt;ParsedItem, NetworkError&gt; -- ParseError is gone</code></pre>
+
+        <p>The <code>throwOn</code> method is the escape hatch going the other direction: it re-throws on a specific error type, which is useful when you want to bail out of a pipeline at a known fatal condition.</p>
+
+        <h2>Task</h2>
+        <p><code>Task&lt;T, E&gt;</code> is for single async operations: an HTTP call, a DB query, reading a file. It's lazy (nothing runs until you call <code>.run()</code> or <code>.result()</code>) and carries the same success/error vocabulary as <code>Stream</code>. The same <code>map</code>, <code>flatMap</code>, <code>mapErr</code>, <code>recover</code>, and <code>recoverWhen</code> methods are available. What <code>Task</code> adds is <code>retry</code>, <code>timeout</code>, and <code>withSignal</code>:</p>
+
+        <pre><code class="language-typescript">import { Task } from "@anabranch/anabranch";
+
+const user = await Task.of((signal) =&gt; fetch("/api/user", { signal }).then((r) =&gt; r.json()))
+  .retry({
+    attempts: 3,
+    delay: (attempt, _err) =&gt; 200 * 2 ** attempt, // 200ms, 400ms, 800ms
+    when: (err) =&gt; err instanceof NetworkError,
+  })
+  .timeout(5_000)
+  .run();</code></pre>
+
+        <p>One design choice worth being upfront about: error types in this library are unchecked. The source comment on <code>Task.of</code> says it directly: "the error type <code>E</code> represents the expected error shape rather than a runtime guarantee." The same applies to <code>Source</code>. You're declaring what you expect, but TypeScript can't verify it at runtime. The library deliberately stays flexible here rather than adding the machinery that would make errors fully checked. Packages like <code>@anabranch/db</code> and <code>@anabranch/fs</code> build on this by wrapping raw driver errors into structured classes, earning their types at the boundary, but the core keeps it lightweight.</p>
+
+        <p><code>Task.acquireRelease</code> is a first-class bracket pattern: it acquires a resource, uses it, then releases it whether the use phase succeeded or failed. This is how the database package manages connection lifetimes, and you can use it directly for any resource that needs deterministic cleanup.</p>
+
+        <h2>Channel</h2>
+        <p>Sometimes you don't control when values arrive: a WebSocket pushes messages, an event emitter fires callbacks, a queue delivers items. That's what <code>Channel</code> is for: a push-based source that you write to from the outside and consume as a <code>Stream</code> from the inside.</p>
+
+        <pre><code class="language-typescript">import { Channel } from "@anabranch/anabranch";
+
+const channel = Channel.create&lt;string, Error&gt;({ bufferSize: 256 });
+
+ws.on("message", (data) =&gt; channel.send(data));
+ws.on("error", (err) =&gt; channel.fail(err));
+ws.on("close", () =&gt; channel.close());
+
+for await (const result of channel) {
+  if (result.type === "success") process(result.value);
+}</code></pre>
+
+        <p>If the consumer falls behind, <code>Channel</code> drops values once the buffer is full, with an optional <code>onDrop</code> callback for monitoring. Because <code>Channel</code> extends <code>Stream</code>, you can chain <code>map</code>, <code>filter</code>, or any other stream operation directly on it before consuming.</p>
+
+        <h2>Concurrency</h2>
+        <p>By default, <code>map</code> and <code>flatMap</code> execute sequentially. Calling <code>.withConcurrency(n)</code> on the source opts into parallel execution: up to <code>n</code> items are in flight simultaneously and results are collected as they complete, potentially out of order. <code>.withBufferSize(n)</code> adds backpressure so the source pauses if more than <code>n</code> results are queued downstream.</p>
+
+        <pre><code class="language-typescript">const processed = await Source.from(async function* () {
+  for (const id of userIds) yield id;
+})
+  .withConcurrency(10)   // up to 10 fetches in flight at once
+  .withBufferSize(50)    // pause if more than 50 results are queued
+  .map((id) =&gt; fetchUser(id))
+  .filter((user) =&gt; user.active)
+  .collect();</code></pre>
+
+        <p>The sequential path is just an async generator loop with no extra overhead. The concurrent path only activates when concurrency is a finite number greater than one, so you don't pay for it when you don't need it.</p>
+
+        <h2>Ecosystem: Broken Link Checker</h2>
+        <p>All the ecosystem packages are built on the same primitives and follow the same conventions. The broken link checker is a good example of how they compose. It takes a list of seed URLs, crawls each one to extract links, and checks them concurrently, returning results as a <code>Stream</code> so you can apply any stream operation to the output:</p>
+
+        <pre><code class="language-typescript">import { BrokenLinkChecker } from "@anabranch/broken-link-checker";
+
+const { successes: broken, errors } = await BrokenLinkChecker.create()
+  .withConcurrency(20)
+  .withTimeout(10_000)
+  .check(["https://example.com", "https://example.com/sitemap.xml"])
+  .tap((r) =&gt; console.log(`[${r.statusCode}] ${r.url}`))
+  .tapErr((err) =&gt; console.error("Crawler error:", err.message))
+  .filter((r) =&gt; !r.ok)  // keep only broken links
+  .partition();           // successes = broken, errors = crawler failures</code></pre>
+
+        <p>Internally, it uses a <code>Channel</code> as a work queue. Seed URLs go in, the crawler processes them, extracts new links, and feeds those back into the channel. The consumer side is the stream the caller gets back from <code>.check()</code>. HTTP requests go through <code>@anabranch/web-client</code>, which itself returns <code>Task</code> instances with built-in retry and <code>Retry-After</code>-aware exponential backoff.</p>
+
+        <p>The builder pattern is worth highlighting. Every package uses a private constructor, a static <code>create()</code> factory, and immutable <code>with*()</code> chaining (each call returns a new instance). It's a bit more ceremony than a plain options bag, but the immutability pays off when you're building variations of a checker by branching off a shared base config.</p>
+
+        <h2>Ecosystem: Database</h2>
+        <p>The database package wraps any DB adapter in the same <code>Task</code>/<code>Source</code> type universe. <code>db.query()</code> returns a <code>Task</code>, and <code>db.stream()</code> returns a cursor-backed <code>Source</code> for large result sets. <code>DB.withConnection</code> uses <code>Task.acquireRelease</code> under the hood, so the connection is guaranteed to release back to the pool whether the operation succeeds or throws:</p>
+
+        <pre><code class="language-typescript">import { Task } from "@anabranch/anabranch";
+import { DB } from "@anabranch/db";
+import { PostgresConnector } from "@anabranch/db-postgres";
+
+const connector = new PostgresConnector({ connectionString: DATABASE_URL });
+
+const totalRevenue = await DB.withConnection(connector, (db) =&gt;
+  Task.of(() =&gt;
+    db.stream&lt;Order&gt;("SELECT * FROM orders WHERE status = 'paid'")
+      .tapErr((err) =&gt; console.error("Stream error:", err.message))
+      .filter((order) =&gt; order.currency === "USD")
+      .map((order) =&gt; order.total)
+      .fold((sum, total) =&gt; sum + total, 0),
+  )
+).run();</code></pre>
+
+        <p>There are separate packages for PostgreSQL (<code>@anabranch/db-postgres</code>), MySQL (<code>@anabranch/db-mysql</code>), and SQLite (<code>@anabranch/db-sqlite</code>), each implementing the same <code>DBConnector</code>/<code>DBAdapter</code> interface. Structured error types (<code>ConnectionFailed</code>, <code>QueryFailed</code>, <code>ConstraintViolation</code>, <code>TransactionFailed</code>) make error handling specific enough to be useful without catching raw driver exceptions.</p>
+
+        <h2>Why Deno?</h2>
+        <p>I've been watching Ryan Dahl's talks for a while. What draws me to Deno is the attitude behind it: no bullshit, batteries included, just the right things in the right place. It reminds me of Go in that way. You get a formatter, a test runner, a linter, and first-class TypeScript support without installing anything extra or maintaining a <code>tsconfig.json</code>. The standard library is well-designed and the module system actually makes sense. For a library project in particular, that baseline removes a lot of friction.</p>
+
+        <p>The npm compatibility story is good enough now that I don't feel like I'm choosing a niche. Source files use <code>.ts</code> imports and JSR packages, and the npm distributions are generated from those via <a href="https://github.com/denoland/dnt" target="_blank" rel="noopener noreferrer"><code>@deno/dnt</code></a>. The published packages land on both <a href="https://jsr.io/@anabranch/anabranch" target="_blank" rel="noopener noreferrer">JSR</a> and npm under the <code>@anabranch</code> scope.</p>
+
+        <h2>What's Next</h2>
+        <p>Honestly, I'm just enjoying building it. Working with the anabranch primitives to add new packages keeps being fun, and I think the project will keep growing because of that rather than from any particular roadmap. The building blocks feel right, so I'll keep adding more of them.</p>
+
+        <p>The source is on <a href="https://github.com/frodi-karlsson/anabranch" target="_blank" rel="noopener noreferrer">GitHub</a> and the API docs are at <a href="https://frodi-karlsson.github.io/anabranch" target="_blank" rel="noopener noreferrer">frodi-karlsson.github.io/anabranch</a>.</p>
+      </slot:content>
+    <%/ blog_post.html %>
+  </slot:body>
+<%/ layout.html %>

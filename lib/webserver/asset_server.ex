@@ -3,6 +3,8 @@ defmodule Webserver.AssetServer do
   Manages static asset paths and manifest resolution using ETS.
   """
 
+  @behaviour Webserver.AssetResolver
+
   use GenServer
   require Logger
 
@@ -18,6 +20,7 @@ defmodule Webserver.AssetServer do
     GenServer.start_link(__MODULE__, [], name: __MODULE__)
   end
 
+  @impl true
   @spec resolve(String.t()) :: {:ok, String.t()} | {:error, :not_found}
   def resolve(path) when is_binary(path) do
     case :ets.lookup(@table_name, path) do
@@ -26,6 +29,7 @@ defmodule Webserver.AssetServer do
     end
   end
 
+  @impl true
   @spec resolve_meta(String.t()) ::
           {:ok, %{width: pos_integer(), height: pos_integer()}} | {:error, :not_found}
   def resolve_meta(path) when is_binary(path) do
