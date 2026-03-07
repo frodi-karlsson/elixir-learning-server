@@ -123,7 +123,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.2.2
+        uses: aquasecurity/setup-trivy@v1
         with:
           version: v0.57.1
           cache: true
