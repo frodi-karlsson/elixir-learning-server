@@ -1,6 +1,6 @@
 ---
 title: Anabranch: Error-Tolerant Async Streams for TypeScript
-date: 2026-03-07
+date: 2026-03-08
 category: TypeScript
 summary: A look at the anabranch library ecosystem for async stream processing where errors flow alongside successes instead of killing the pipeline.
 canonical: https://blog.frodikarlsson.com/anabranch
@@ -12,7 +12,7 @@ canonical: https://blog.frodikarlsson.com/anabranch
   <slot:body>
     <% blog_post.html %>
       <slot:category>TypeScript</slot:category>
-      <slot:date>Mar 7, 2026</slot:date>
+      <slot:date>Mar 8, 2026</slot:date>
       <slot:title>Anabranch: Error-Tolerant Async Streams for TypeScript</slot:title>
       <slot:content>
         <p><a href="https://github.com/frodi-karlsson/anabranch" target="_blank" rel="noopener noreferrer">Anabranch</a> is a TypeScript library for async stream processing where errors don't kill the pipeline. Instead of a single thrown exception stopping everything, errors flow alongside successes as tagged results: <code>{ type: "success", value }</code> or <code>{ type: "error", error }</code>. The pipeline runs to completion and you decide what to do with the errors at the end.</p>
@@ -108,6 +108,8 @@ const user = await Task.of((signal) =&gt; fetch("/api/user", { signal }).then((r
   .timeout(5_000)
   .run();</code></pre>
 
+        <p>Tasks also compose for concurrency using <code>Task.allSettled</code> and <code>Task.race</code>, letting you manage multiple independent operations while keeping their individual error-handling logic intact.</p>
+
         <p>One design choice worth being upfront about: error types in this library are unchecked. The source comment on <code>Task.of</code> says it directly: "the error type <code>E</code> represents the expected error shape rather than a runtime guarantee." The same applies to <code>Source</code>. You're declaring what you expect, but TypeScript can't verify it at runtime. The library deliberately stays flexible here rather than adding the machinery that would make errors fully checked. Packages like <code>@anabranch/db</code> and <code>@anabranch/fs</code> build on this by wrapping raw driver errors into structured classes, earning their types at the boundary, but the core keeps it lightweight.</p>
 
         <p><code>Task.acquireRelease</code> is a first-class bracket pattern: it acquires a resource, uses it, then releases it whether the use phase succeeded or failed. This is how the database package manages connection lifetimes, and you can use it directly for any resource that needs deterministic cleanup.</p>
@@ -161,8 +163,57 @@ const { successes: broken, errors } = await BrokenLinkChecker.create()
 
         <p>The builder pattern is worth highlighting. Every package uses a private constructor, a static <code>create()</code> factory, and immutable <code>with*()</code> chaining (each call returns a new instance). It's a bit more ceremony than a plain options bag, but the immutability pays off when you're building variations of a checker by branching off a shared base config.</p>
 
+        <h2>Ecosystem: Message Queue</h2>
+        <p>The <code>@anabranch/queue</code> package provides a message queue abstraction with Task/Stream semantics. It handles delayed delivery, dead letter queues, and visibility timeouts, with separate adapters for Redis (<code>@anabranch/queue-redis</code>) and RabbitMQ (<code>@anabranch/queue-rabbitmq</code>).</p>
+
+        <pre><code class="language-typescript">import { Queue } from "@anabranch/queue";
+import { RedisConnector } from "@anabranch/queue-redis";
+
+const connector = new RedisConnector({ redisUrl: REDIS_URL });
+const queue = await Queue.connect(connector).run();
+
+// Stream messages with concurrent processing
+const { successes, errors } = await queue
+  .stream("notifications", { concurrency: 5 })
+  .map(async (msg) =&gt; await sendNotification(msg.data))
+  .partition();</code></pre>
+
+        <h2>Ecosystem: Object Storage</h2>
+        <p>The <code>@anabranch/storage</code> package brings uniform object storage primitives. It supports AWS S3 (<code>@anabranch/storage-s3</code>), Google Cloud Storage (<code>@anabranch/storage-gcs</code>), and even IndexedDB (<code>@anabranch/storage-browser</code>) for local browser storage.</p>
+
+        <pre><code class="language-typescript">import { Storage } from "@anabranch/storage";
+import { S3Connector } from "@anabranch/storage-s3";
+
+const storage = await Storage.connect(new S3Connector({ bucket: "uploads" })).run();
+
+// Upload a file as a Task
+await storage.put("hello.txt", "Hello world").run();
+
+// List objects concurrently using Stream
+const results = await storage.list("files/")
+  .withConcurrency(10)
+  .map(async (entry) =&gt; await processFile(entry))
+  .collect();</code></pre>
+
+        <h2>Ecosystem: File System</h2>
+        <p>The <code>@anabranch/fs</code> package provides streaming file-system utilities. Multi-value operations like <code>glob</code> return a <code>Source</code> for streaming, and single-value operations like <code>readFile</code> return a <code>Task</code> for composable error handling.</p>
+
+        <pre><code class="language-typescript">import { glob, readLines } from "@anabranch/fs";
+
+const { successes, errors } = await glob("./src", "**/*.ts")
+  .flatMap(async (entry) =&gt; {
+    const lines = await readLines(entry.path)
+      .filter((line) =&gt; line.includes("TODO"))
+      .map((line) =&gt; ({ path: entry.path, line }))
+      .collect();
+    return lines;
+  })
+  .partition();</code></pre>
+
         <h2>Ecosystem: Database</h2>
-        <p>The database package wraps any DB adapter in the same <code>Task</code>/<code>Source</code> type universe. <code>db.query()</code> returns a <code>Task</code>, and <code>db.stream()</code> returns a cursor-backed <code>Source</code> for large result sets. <code>DB.withConnection</code> uses <code>Task.acquireRelease</code> under the hood, so the connection is guaranteed to release back to the pool whether the operation succeeds or throws:</p>
+        <p>The database package wraps any DB adapter in the same <code>Task</code>/<code>Source</code> type universe. <code>db.query()</code> returns a <code>Task</code>, and <code>db.stream()</code> returns a cursor-backed <code>Source</code> for large result sets. <code>DB.withConnection</code> uses <code>Task.acquireRelease</code> under the hood, so the connection is guaranteed to release back to the pool whether the operation succeeds or throws.</p>
+
+        <p>A <code>withTransaction</code> method executes a callback within a transaction, automatically committing on success or rolling back on error, providing a safe and composable way to handle database transactions.</p>
 
         <pre><code class="language-typescript">import { Task } from "@anabranch/anabranch";
 import { DB } from "@anabranch/db";
@@ -171,8 +222,8 @@ import { PostgresConnector } from "@anabranch/db-postgres";
 const connector = new PostgresConnector({ connectionString: DATABASE_URL });
 
 const totalRevenue = await DB.withConnection(connector, (db) =&gt;
-  Task.of(() =&gt;
-    db.stream&lt;Order&gt;("SELECT * FROM orders WHERE status = 'paid'")
+  db.withTransaction(async (tx) =&gt;
+    tx.stream&lt;Order&gt;("SELECT * FROM orders WHERE status = 'paid'")
       .tapErr((err) =&gt; console.error("Stream error:", err.message))
       .filter((order) =&gt; order.currency === "USD")
       .map((order) =&gt; order.total)
