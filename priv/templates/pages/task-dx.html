@@ -1,0 +1,99 @@
+---
+title: Task Chaining and DX: Building a Convergent Async Ecosystem
+date: 2026-03-10
+category: TypeScript
+tags: anabranch
+summary: Exploring the design philosophy behind Task.chain and how Anabranch positions itself between lightweight utilities and full-blown functional frameworks.
+canonical: https://blog.frodikarlsson.com/task-chaining-and-dx
+---
+<% layout.html %>
+  <slot:title>Task Chaining and DX: Building a Convergent Async Ecosystem</slot:title>
+  <slot:description>Exploring the design philosophy behind Task.chain and how Anabranch positions itself between lightweight utilities and full-blown functional frameworks.</slot:description>
+  <slot:og_type>article</slot:og_type>
+  <slot:body>
+    <% blog_post.html %>
+      <slot:category>TypeScript</slot:category>
+      <slot:date>Mar 10, 2026</slot:date>
+      <slot:title>Task Chaining and DX: Building a Convergent Async Ecosystem</slot:title>
+      <slot:content>
+        <p>Developer Experience (DX) is often about finding the right level of abstraction. While building out the database and event log adapters for Anabranch, I spent time thinking about how to get the <code>Task</code> composition just right. In this ecosystem, a <code>Task</code> is the fundamental building block for a single async action. It is a more resilient alternative to a raw Promise that includes built-in support for retries, timeouts, and signals. It sits alongside other primitives like pull-based <code>Stream</code> and push-based <code>Channel</code> with first-class backpressure support, all designed to compose together into a cohesive whole.</p>
+
+        <h2>Utils, Libraries, and Frameworks</h2>
+        <p>Anabranch occupies a unique space between specialized utilities and all-encompassing frameworks. By building it as an ecosystem rather than just a library, the goal is to provide a cohesive experience where different parts of the stack speak the same language. Let’s look at how a common scenario (fetching a user, calling an API with retries, and updating a database) compares across three different libraries across these scopes.</p>
+
+        <h3>Anabranch: An Ecosystem</h3>
+        <p>Anabranch is built as a set of interoperable abstractions for the modern stack, including <code>db</code>, <code>eventlog</code>, <code>queue</code>, and <code>storage</code>. Because every part of the ecosystem speaks the same <code>Task</code> language natively, we remove the friction of manual wrapping while keeping the high-level composition flat and readable.</p>
+        <pre><code class="language-typescript">import { createClient } from "@anabranch/web-client";
+
+const id = "user-123";
+const client = createClient(...);
+
+const result = await Task.chain([
+  () =&gt; db.query&lt;User&gt;(...),
+  (user) =&gt; client.post&lt;ProcessResult&gt;(...)
+    .retry({ attempts: 3, delay: (a) =&gt; 100 * 2 ** a })
+    .timeout(5000),
+  (res) =&gt; db.execute(...),
+]).result();
+
+result.type === "success"
+  ? console.log("Success:", result.value)
+  : console.error("Error:", result.error);</code></pre>
+
+        <h3>RxJS: A Utility Library</h3>
+        <p>RxJS focuses on observable streams. To use it with a standard promise-based client like Axios, you must lift the promise using <code>from</code>. Chaining requires specific operators like <code>switchMap</code> to handle the flattening of async results.</p>
+        <pre><code class="language-typescript">import { from, timer } from 'rxjs';
+import { switchMap, retry, timeout } from 'rxjs/operators';
+import axios from 'axios';
+
+const id = "user-123";
+const client = axios.create(...);
+
+from(db.query&lt;User&gt;(...)).pipe(
+  switchMap(user =&gt; 
+    from(client.post&lt;ProcessResult&gt;(...)).pipe(
+      retry({ count: 3, delay: (err, i) =&gt; timer(100 * 2 ** i) }),
+      timeout(5000)
+    )
+  ),
+  switchMap(res =&gt; from(db.execute(...)))
+).subscribe({
+  next: (val) =&gt; console.log("Success:", val),
+  error: (err) =&gt; console.error("Error:", err)
+});</code></pre>
+
+        <h3>Effect: A Backend Framework</h3>
+        <p>Effect is a complete functional stack. While extremely powerful, it requires lifting promises into the Effect runtime (e.g., via <code>Effect.promise</code>) and uses a more specialized scheduling API for resilience. It's less of a library and more of a total architectural choice.</p>
+        <pre><code class="language-typescript">import { Effect, Schedule, Exit } from "effect";
+import axios from "axios";
+
+const id = "user-123";
+const client = axios.create(...);
+
+const program = Effect.gen(function* (_) {
+  const user = yield* _(Effect.promise(() =&gt; db.query&lt;User&gt;(...)));
+  const res = yield* _(
+    Effect.promise(() =&gt; client.post&lt;ProcessResult&gt;(...))
+      .pipe(
+        Effect.retry(Schedule.exponential(100).pipe(Schedule.recurs(3))),
+        Effect.timeout("5 seconds")
+      )
+  );
+  return yield* _(Effect.promise(() =&gt; db.execute(...)));
+});
+
+const result = await Effect.runPromiseExit(program);
+
+Exit.isSuccess(result)
+  ? console.log("Success:", result.value)
+  : console.error("Error:", result.cause);</code></pre>
+
+        <h2>The Limits of Inference</h2>
+        <p>One of the most satisfying parts of this implementation was getting the type inference to "roll" correctly through the array. However, TypeScript has inherent limits when inferring types across generic array elements. To keep the compiler fast and the types predictable, <code>Task.chain</code> is implemented via overloads that support up to seven levels of sequential inference.</p>
+        <p>This covers almost all common use cases. If a process grows beyond seven steps, it's usually a signal that the logic should be decomposed into smaller, nested chains or simply handled with standard <code>flatMap</code> calls between two separate chains. This deliberate design choice keeps the developer experience smooth while maintaining a high-performance type system.</p>
+
+        <p>The philosophy of Anabranch is to provide about 90% of the benefit of a full functional stack with 10% of the cognitive overhead. It's about making the right thing the easy thing.</p>
+      </slot:content>
+    <%/ blog_post.html %>
+  </slot:body>
+<%/ layout.html %>

@@ -2,6 +2,7 @@
 title: KafkaJS: Why Your Offset Commits Take Exactly Five Seconds
 date: 2026-03-10
 category: TypeScript
+tags: anabranch
 summary: A 2:30 AM deep dive into KafkaJS offset commit latency and the technical workaround for bypassing its internal five-second transitive consumer delay.
 canonical: https://blog.frodikarlsson.com/kafkajs-admin-setoffsets-optimization
 ---
@@ -38,7 +39,7 @@ const consumer = createConsumer({
         <p>In idle groups or topics with no new data, the consumer blocks for the full duration of <code>maxWaitTimeInMs</code> before the fetch request times out and the operation continues. While this is a safe default for high-throughput production consumers, it is unnecessarily slow for administrative updates.</p>
 
         <h2>Fitting Kafka into a Clean Interface</h2>
-        <p>The <code>@anabranch/eventlog</code> abstraction defines a simple <code>commitCursor</code> operation that should, in theory, be a straightforward metadata update. Mapping this "obvious" requirement onto Kafka proved surprisingly difficult due to how Kafka manages group state and offsets. Unlike a simple key-value store, Kafka's offsets are tightly coupled to consumer group coordination, which introduces numerous edge cases - especially when trying to commit offsets "out-of-band" while a group might be rebalancing or empty.</p>
+        <p>The <code>@anabranch/eventlog</code> abstraction defines a simple <code>commitCursor</code> operation that should, in theory, be a straightforward metadata update. Mapping this "obvious" requirement onto Kafka proved surprisingly difficult due to how Kafka manages group state and offsets. Unlike a simple key-value store, Kafka's offsets are tightly coupled to consumer group coordination, which introduces numerous edge cases, especially when trying to commit offsets "out-of-band" while a group might be rebalancing or empty.</p>
 
         <h2>A Configurable Mimic</h2>
         <p>To resolve the latency issue while respecting Kafka's requirements, we can mimic KafkaJS’s internal logic but with explicit control over the timing parameters. Instead of using the high-level <code>admin.setOffsets</code>, we implement a more surgical commit by spinning up a temporary consumer with a significantly lower <code>maxWaitTimeInMs</code> (e.g., 100ms).</p>
@@ -51,7 +52,7 @@ const consumer = createConsumer({
           <li>Perform a standard <code>commitOffsets</code> and immediately disconnect.</li>
         </ol>
 
-        <p>By manually controlling the lifecycle and timing of this transitive consumer, we maintain the correctness of the group offset commit while reducing the latency from 5000ms to ~150ms per call. It’s still not fantastic - it remains the slowest integration test in the suite - but Kafka is bulky by nature, and 150ms is a far better baseline than five seconds.</p>
+        <p>By manually controlling the lifecycle and timing of this transitive consumer, we maintain the correctness of the group offset commit while reducing the latency from 5000ms to ~150ms per call. It’s still not fantastic, it remains the slowest integration test in the suite, but Kafka is bulky by nature, and 150ms is a far better baseline than five seconds.</p>
 
         <p>The source for this adapter and the rest of the <a href="https://github.com/frodi-karlsson/anabranch" target="_blank" rel="noopener noreferrer">Anabranch monorepo</a> is available on GitHub and <a href="https://jsr.io/@anabranch/anabranch" target="_blank" rel="noopener noreferrer">JSR</a>.</p>
       </slot:content>
