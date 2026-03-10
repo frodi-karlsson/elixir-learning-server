@@ -1,0 +1,84 @@
+---
+title: "Wrestling with KafkaJS: The Ghost in the Admin Client"
+date: 2026-03-10
+category: TypeScript
+summary: A deep dive into a 5-second "ghost" delay in KafkaJS's admin client and how we worked around it in the Anabranch ecosystem.
+canonical: https://blog.frodikarlsson.com/kafkajs-ghost-admin
+---
+<% layout.html %>
+  <slot:title>Wrestling with KafkaJS: The Ghost in the Admin Client</slot:title>
+  <slot:description>A deep dive into a 5-second "ghost" delay in KafkaJS's admin client and how we worked around it in the Anabranch ecosystem.</slot:description>
+  <slot:og_type>article</slot:og_type>
+  <slot:body>
+    <% blog_post.html %>
+      <slot:category>TypeScript</slot:category>
+      <slot:date>Mar 10, 2026</slot:date>
+      <slot:title>Wrestling with KafkaJS: The Ghost in the Admin Client</slot:title>
+      <slot:content>
+        <p>Kafka is powerful, but it's not exactly known for its developer ergonomics. Recently, while building the <code>@anabranch/eventlog-kafka</code> adapter, I ran into a classic KafkaJS "gotcha" that felt like fighting a ghost: a mysterious, consistent 5-second delay on manual offset commits.</p>
+
+        <p>The <code>@anabranch/eventlog</code> abstraction allows for at-least-once delivery by letting you manually commit cursors (offsets) after processing a batch. When using the Kafka adapter, this eventually maps down to the KafkaJS <code>admin.setOffsets</code> call. And that's where the trouble started.</p>
+
+        <h2>The 5-Second Mystery</h2>
+        <p>In integration tests, every manual commit was taking exactly 5 seconds. If I did two commits, it took 10 seconds. It was maddeningly consistent. My initial thought was that the consumer group was stuck in a rebalance, but the delay happened even when the consumer was already disconnected.</p>
+
+        <p>The smoking gun appeared when digging into the KafkaJS source. It turns out that <code>admin.setOffsets</code> isn't just a simple metadata update. Under the hood, KafkaJS implements this by spinning up a "transitive" consumer. It joins the group, fetches the current state, sets the offsets, and leaves. And here's the kicker: it uses the default <code>maxWaitTimeInMs</code> of 5000ms for its internal fetch requests.</p>
+
+        <pre><code class="language-javascript">// Inside kafkajs/src/admin/index.js
+const consumer = this.cluster.consumer({
+  groupId,
+  maxWaitTimeInMs: this.maxWaitTimeInMs, // Defaults to 5000!
+  // ...
+})</code></pre>
+
+        <p>If the group is empty or the topic is idle, that internal consumer will sit there and wait for the full 5 seconds before giving up on the fetch and proceeding with the offset update. It's a safeguard built for high-throughput production environments (like LinkedIn's interactions), but it's a productivity killer for developers running local tests or low-latency administrative tasks.</p>
+
+        <h2>The Anabranch Workaround</h2>
+        <p>To fix this in the <code>@anabranch/eventlog-kafka</code> adapter, I had to bypass the high-level <code>admin.setOffsets</code> and implement a more surgical "out-of-band" commit using a temporary dummy consumer with a much lower timeout.</p>
+
+        <p>By manually controlling the lifecycle of this temporary consumer and setting <code>maxWaitTimeInMs</code> to something sane (like 100ms), we can jump into the group, <code>seek</code> to the target offsets, <code>commit</code>, and get out immediately.</p>
+
+        <pre><code class="language-typescript">async commitCursor(topic, consumerGroup, cursor) {
+  // ... (transform cursor to offsetsToCommit)
+
+  // We spin up our own dummy consumer to bypass the 5s admin default
+  const dummyConsumer = state.kafka.consumer({
+    ...options.consumer,
+    maxWaitTimeInMs: options.admin?.dummyMaxWaitTimeInMs ?? 100,
+    groupId: consumerGroup,
+  });
+
+  try {
+    await dummyConsumer.connect();
+    await dummyConsumer.subscribe({ topic, fromBeginning: true });
+
+    await new Promise&lt;void&gt;((resolve, reject) =&gt; {
+      // Once we get a FETCH event (or a timeout), we stop and resolve
+      dummyConsumer.on(dummyConsumer.events.FETCH, () =&gt; {
+        dummyConsumer.stop().then(resolve).catch(reject);
+      });
+
+      dummyConsumer.run({ eachBatchAutoResolve: false }).catch(reject);
+      dummyConsumer.pause([{ topic }]);
+
+      for (const { partition, offset } of offsetsToCommit) {
+        dummyConsumer.seek({ topic, partition, offset });
+      }
+    });
+  } finally {
+    await dummyConsumer.disconnect();
+  }
+}</code></pre>
+
+        <p>This implementation effectively does what <code>admin.setOffsets</code> *should* do for administrative tasks: update the pointer and leave without waiting for data that might not exist.</p>
+
+        <h2>Why is KafkaJS like this?</h2>
+        <p>KafkaJS is an incredible feat of engineering—a pure JavaScript client that handles the complex Kafka protocol without native dependencies. But its design often prioritizes safety and "LinkedIn-scale" stability over developer ergonomics. Many of its internal timeouts and retry strategies are hardcoded or buried deep in the configuration.</p>
+
+        <p>Wrestling with these primitives is part of the "Kafka tax." But once you wrap them in a cleaner abstraction like Anabranch's <code>Stream</code> and <code>Task</code>, you can hide that complexity from the rest of your application. The <code>EventLog</code> interface doesn't care about <code>maxWaitTimeInMs</code>; it just knows that when you call <code>commit()</code>, the cursor is saved.</p>
+
+        <p>The source for the Kafka adapter is on <a href="https://github.com/frodi-karlsson/anabranch/tree/main/packages/eventlog-kafka" target="_blank" rel="noopener noreferrer">GitHub</a>. If you're using Kafka with TypeScript, it might save you a few 5-second headaches.</p>
+      </slot:content>
+    <%/ blog_post.html %>
+  </slot:body>
+<%/ layout.html %>
