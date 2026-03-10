@@ -75,6 +75,8 @@ console.log(`${successes.length} processed, ${errors.length} failed`);</code></p
         <h2>Source and Stream</h2>
         <p><code>Source</code> is the entry point. It wraps an async generator: each <code>yield</code> becomes a success result, and any thrown error becomes a single error result. From a <code>Source</code> you get a <code>Stream</code>, which is where the pipeline API lives.</p>
 
+        <p>Beyond `Source.from` for async generators, you can also use `Source.fromResults` when your source already produces tagged results, `Source.fromTask` to convert a single asynchronous operation into a stream, or `Source.fromArray` for convenience when starting with a collection of values.</p>
+
         <p>A <code>Stream</code> is an <code>AsyncIterable&lt;Result&lt;T, E&gt;&gt;</code> with about 25 chainable methods: <code>map</code>, <code>flatMap</code>, <code>filter</code>, <code>fold</code>, <code>scan</code>, <code>take</code>, <code>chunks</code>, and more. Terminal operations like <code>collect()</code>, <code>toArray()</code>, <code>successes()</code>, and <code>partition()</code> consume the stream and return a promise. Everything is lazy: nothing runs until you call a terminal operation.</p>
 
         <h2>Dual-Channel Operations</h2>
@@ -95,6 +97,10 @@ const results = await Source.from&lt;string, NetworkError | ParseError&gt;(fetch
 
         <p>The <code>throwOn</code> method is the escape hatch going the other direction: it re-throws on a specific error type, which is useful when you want to bail out of a pipeline at a known fatal condition.</p>
 
+        <p>For more integrated transformations, <code>tryMap</code> allows you to map successful values and transform errors within a single operation, providing both the original value and the error to your error handling function.</p>
+
+        <p>Beyond individual stream transformations, you can also combine streams: <code>zip</code> combines two streams into tuples, pairing values one-to-one, while <code>merge</code> interleaves results from multiple streams as they become available, enabling concurrent processing of independent data flows.</p>
+
         <h2>Task</h2>
         <p><code>Task&lt;T, E&gt;</code> is for single async operations: an HTTP call, a DB query, reading a file. It's lazy (nothing runs until you call <code>.run()</code> or <code>.result()</code>) and carries the same success/error vocabulary as <code>Stream</code>. The same <code>map</code>, <code>flatMap</code>, <code>mapErr</code>, <code>recover</code>, and <code>recoverWhen</code> methods are available. What <code>Task</code> adds is <code>retry</code>, <code>timeout</code>, and <code>withSignal</code>:</p>
 
@@ -109,11 +115,26 @@ const user = await Task.of((signal) =&gt; fetch("/api/user", { signal }).then((r
   .timeout(5_000)
   .run();</code></pre>
 
-        <p>Tasks also compose for concurrency using <code>Task.allSettled</code> and <code>Task.race</code>, letting you manage multiple independent operations while keeping their individual error-handling logic intact.</p>
+        <p>Beyond these, <code>Task</code> also provides <code>tryMap</code> for integrated mapping and error transformation, <code>tap</code> and <code>tapErr</code> for side effects without altering the result, and <code>tryFlatMap</code> and <code>flatMapErr</code> for advanced chaining logic, allowing you to manipulate both success and error paths with precision.</p>
 
-        <p>One design choice worth being upfront about: error types in this library are unchecked. The source comment on <code>Task.of</code> says it directly: "the error type <code>E</code> represents the expected error shape rather than a runtime guarantee." The same applies to <code>Source</code>. You're declaring what you expect, but TypeScript can't verify it at runtime. The library deliberately stays flexible here rather than adding the machinery that would make errors fully checked. Packages like <code>@anabranch/db</code> and <code>@anabranch/fs</code> build on this by wrapping raw driver errors into structured classes, earning their types at the boundary, but the core keeps it lightweight.</p>
+        <p>Tasks also compose for concurrency: `Task.allSettled` collects all results without throwing, while `Task.all` rejects on the first failure, making it suitable for scenarios where all tasks must succeed. `Task.race` resolves with the first settled result, letting you manage multiple independent operations while keeping their individual error-handling logic intact.</p>
+
+
 
         <p><code>Task.acquireRelease</code> is a first-class bracket pattern: it acquires a resource, uses it, then releases it whether the use phase succeeded or failed. This is how the database package manages connection lifetimes, and you can use it directly for any resource that needs deterministic cleanup.</p>
+
+        <h2>Task.chain: Sequential Composition</h2>
+        <p><code>Task.chain</code> provides a powerful way to compose a series of dependent asynchronous operations sequentially. Each task in the chain receives the successful result of the previous task, allowing for clear and concise definition of multi-step workflows. If any task in the chain fails, the entire chain short-circuits, returning the error immediately.</p>
+        <pre><code class="language-typescript">import { Task } from "@anabranch/anabranch";
+
+const finalResult = await Task.chain([
+  () => Task.of(() => 10),
+  (value) => Task.of(() => value * 2),
+  (doubledValue) => Task.of(() => `Result: ${doubledValue}`),
+]).run();
+
+console.log(finalResult); // Output: Result: 20
+</code></pre>
 
         <h2>Channel</h2>
         <p>Sometimes you don't control when values arrive: a WebSocket pushes messages, an event emitter fires callbacks, a queue delivers items. That's what <code>Channel</code> is for: a push-based source that you write to from the outside and consume as a <code>Stream</code> from the inside.</p>
@@ -131,6 +152,8 @@ for await (const result of channel) {
 }</code></pre>
 
         <p>If the consumer falls behind, <code>Channel</code> drops values once the buffer is full, with an optional <code>onDrop</code> callback for monitoring. Because <code>Channel</code> extends <code>Stream</code>, you can chain <code>map</code>, <code>filter</code>, or any other stream operation directly on it before consuming.</p>
+
+        <p>Producers can use <code>channel.waitForCapacity()</code> to pause until there's space in the buffer, respecting backpressure and preventing dropped messages. You can also check the channel's status with <code>channel.isClosed()</code>. If a channel is aborted via an `AbortSignal`, `waitForCapacity()` will reject with a `ChannelAbortError`.</p>
 
         <h2>Concurrency</h2>
         <p>By default, <code>map</code> and <code>flatMap</code> execute sequentially. Calling <code>.withConcurrency(n)</code> on the source opts into parallel execution: up to <code>n</code> items are in flight simultaneously and results are collected as they complete, potentially out of order. <code>.withBufferSize(n)</code> adds backpressure so the source pauses if more than <code>n</code> results are queued downstream.</p>
