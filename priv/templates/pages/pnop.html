@@ -56,23 +56,23 @@ canonical: https://blog.frodikarlsson.com/pnop
 
         <pre><code class="language-sh">brew install --cask frodi-karlsson/tap/pnop
 
-pnop setup -c work --vault=MyVault --item="My item" --field=MyField</code></pre>
+pnop +setup -c work --vault=MyVault --item="My item" --field=MyField</code></pre>
 
-        <p>The field's value can be a bare token or a whole <code>//registry.npmjs.org/:_authToken=&lt;token&gt;</code> line.</p>
+        <p>The cask pulls in <code>1password-cli</code> too. The field's value can be a bare token or a whole <code>//registry.npmjs.org/:_authToken=&lt;token&gt;</code> line.</p>
 
-        <p>Setup probes what it fetched and says whose it is, which is the same question the recovery path asks:</p>
+        <p>pnop's own commands carry a <code>+</code>: <code>+setup</code>, <code>+refresh</code>, <code>+version</code>, <code>+help</code>. Everything without one belongs to pnpm. pnpm has a <code>setup</code> of its own, and a repo script named <code>refresh</code> stays reachable as plain <code>pnpm refresh</code>.</p>
+
+        <p>Setup probes what it fetched and says whose it is:</p>
 
         <pre><code>[pnop] registry.npmjs.org accepts this token right now, as frodi</code></pre>
 
-        <p>Right now is the only claim it makes.</p>
-
         <p>You can define more than one config and switch between them, which I use for work and personal registries:</p>
 
-        <pre><code class="language-sh">pnop setup -c personal --vault=MyOtherVault --item="My other item" --field=MyField
-pnop setup -c personal   # switch
-pnop setup -c work       # switch back</code></pre>
+        <pre><code class="language-sh">pnop +setup -c personal --vault=MyOtherVault --item="My other item" --field=MyField
+pnop +setup -c personal   # switch
+pnop +setup -c work       # switch back</code></pre>
 
-        <p>Switching rewrites the npmrc with that config's token. Running <code>setup -c</code> against the config that's already active just refetches, which is the manual override when you want one.</p>
+        <p>Switching rewrites the npmrc with that config's token. When I want the token rewritten from the vault without waiting for something to fail, <code>pnop +refresh</code> does it on demand.</p>
 
         <p>Then in my shell config:</p>
 
