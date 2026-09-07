@@ -30,24 +30,27 @@ canonical: https://blog.frodikarlsson.com/pnop
 
         <p><a href="https://github.com/frodi-karlsson/pnop" target="_blank" rel="noopener noreferrer">pnop</a> is a small Go binary that forwards everything to pnpm. If a command succeeds, it does nothing at all.</p>
 
-        <p>If a command fails, it reads what pnpm printed. Unless pnpm reported a registry authentication problem, pnop stays out of the way, so a failing test suite or a type error never reaches for the vault.</p>
-
-        <p>My first attempt decided this from the command instead, with a list of subcommands that never touch the registry. That can't work. pnpm runs any package.json script as a bare subcommand, so a script that shells out to a compiler and a real pnpm command that hits the registry are indistinguishable from the outside. Whether the registry was contacted is a fact about what the process did, not about how its arguments looked. Reading the output also catches a registry failure inside a script that happens to wrap pnpm, which no amount of inspecting arguments would find.</p>
-
-        <p>When pnpm did report an auth problem, pnop compares the token in your <code>.npmrc</code> against the one in 1Password:</p>
+        <p>If a command fails, it asks the registry whether the token in your npmrc is still accepted: <code>GET &lt;registry&gt;/-/whoami</code>. Only a 401 leads anywhere.</p>
 
         <ul>
-          <li><strong>They match.</strong> The token isn't the problem. The original error and pnpm's exit code pass through untouched.</li>
-          <li><strong>They differ.</strong> Rewrite the <code>.npmrc</code> with the fresh token and rerun the command once.</li>
+          <li><strong>200.</strong> The token works, so the failure was something else. Nothing happens.</li>
+          <li><strong>401.</strong> Read 1Password, and write the token if the vault holds a live one.</li>
+          <li><strong>403, 404, 405, 5xx.</strong> Nothing. That describes the endpoint, not your credential.</li>
+          <li><strong>No answer at all.</strong> Nothing. Being offline is not evidence about a token.</li>
         </ul>
 
-        <p>That's the whole idea. The rerun is conditional on the token having actually changed, so a command that failed for any other reason never runs twice.</p>
+        <p>I got here by way of two worse designs. The first inspected the command, with a list of subcommands that never touch the registry, which cannot work: pnpm runs any package.json script as a bare subcommand, so a script shelling out to a compiler and a real pnpm command hitting the registry are indistinguishable from the outside. The second read pnpm's output for auth errors, which worked until the wording changed between pnpm majors, twice, while the fix stayed the same. Asking the registry is a question about the credential answered by the thing that issued it.</p>
 
-        <p>Two things I was careful about:</p>
+        <p><strong>1Password is not touched on the happy path.</strong> A successful command reads no config, contacts no registry, and opens no vault.</p>
 
-        <p><strong>1Password is not touched on the happy path.</strong> The config isn't even loaded until a command has failed, and not even then unless pnpm said the registry turned it away.</p>
+        <p><strong>It does not rerun your command.</strong> This one took me a while to accept. pnop cannot see whether the failed attempt got far enough to have a side effect, so it writes the token, tells you, and gets out of the way:</p>
 
-        <p><strong>pnpm's exit code survives.</strong> The wrapper returns whatever pnpm returned, so scripts and CI see the real number rather than pnop's opinion of it.</p>
+        <pre><code>[pnop] refreshed the npm token in /Users/you/.npmrc
+[pnop] run it again: pnpm add @scope/pkg</code></pre>
+
+        <p>Rerunning is opt-in, and when it does rerun it marks its own environment so one refresh is the budget even if a pnpm script calls pnpm.</p>
+
+        <p>There's also a case it deliberately won't fix. If your token is valid but too narrow for the package you asked for, whoami answers 200 while pnpm answers 404, because identity and authorization are different questions. Nothing to refresh there.</p>
 
         <h2>Setup</h2>
 
@@ -56,6 +59,12 @@ canonical: https://blog.frodikarlsson.com/pnop
 pnop setup -c work --vault=MyVault --item="My item" --field=MyField</code></pre>
 
         <p>The field's value can be a bare token or a whole <code>//registry.npmjs.org/:_authToken=&lt;token&gt;</code> line.</p>
+
+        <p>Setup probes what it fetched and says whose it is, which is the same question the recovery path asks:</p>
+
+        <pre><code>[pnop] registry.npmjs.org accepts this token right now, as frodi</code></pre>
+
+        <p>Right now is the only claim it makes.</p>
 
         <p>You can define more than one config and switch between them, which I use for work and personal registries:</p>
 
@@ -69,11 +78,13 @@ pnop setup -c work       # switch back</code></pre>
 
         <pre><code class="language-sh">alias pnpm=pnop</code></pre>
 
+        <p>An alias only covers what you type. Scripts that call <code>pnpm</code>, package.json scripts included, never see it, so covering those means a shim earlier in your PATH instead.</p>
+
         <h2>What this doesn't solve</h2>
 
         <p>CI. The 90-day rotation still applies to whatever token your pipeline uses, and pnop has no answer for that. It's a local tool that happens to know where my token lives. The discussion above lists the actual options there: GitHub Packages with the built-in token, a registry proxy, or an automated rotation workflow. All of them are more work than an alias.</p>
 
-        <p>It also doesn't make the expiry go away. It moves the recovery from "notice, open a browser, generate, paste, rerun" to "the rerun already happened," which is as much as I wanted from it.</p>
+        <p>It also doesn't make the expiry go away. It moves the recovery from "notice, open a browser, generate, paste, run it again" to just "run it again," which is as much as I wanted from it.</p>
       </slot:content>
     <%/ blog_post.html %>
   </slot:body>
