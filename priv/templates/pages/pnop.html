@@ -34,14 +34,14 @@ canonical: https://blog.frodikarlsson.com/pnop
 
         <ul>
           <li><strong>200.</strong> The token works, so the failure was something else. Nothing happens.</li>
-          <li><strong>401.</strong> Read 1Password, and write the token if the vault holds a live one.</li>
+          <li><strong>401.</strong> Run your token command, and write what it prints if that one is live.</li>
           <li><strong>403, 404, 405, 5xx.</strong> Nothing. That describes the endpoint, not your credential.</li>
           <li><strong>No answer at all.</strong> Nothing. Being offline is not evidence about a token.</li>
         </ul>
 
         <p>I got here by way of two worse designs. The first inspected the command, with a list of subcommands that never touch the registry, which cannot work: pnpm runs any package.json script as a bare subcommand, so a script shelling out to a compiler and a real pnpm command hitting the registry are indistinguishable from the outside. The second read pnpm's output for auth errors, which worked until the wording changed between pnpm majors, twice, while the fix stayed the same. Asking the registry is a question about the credential answered by the thing that issued it.</p>
 
-        <p><strong>1Password is not touched on the happy path.</strong> A successful command reads no config, contacts no registry, and opens no vault.</p>
+        <p><strong>Nothing runs on the happy path.</strong> A successful command reads no config, contacts no registry, and never invokes your token command.</p>
 
         <p><strong>It does not rerun your command.</strong> This one took me a while to accept. pnop cannot see whether the failed attempt got far enough to have a side effect, so it writes the token, tells you, and gets out of the way:</p>
 
@@ -56,9 +56,11 @@ canonical: https://blog.frodikarlsson.com/pnop
 
         <pre><code class="language-sh">brew install --cask frodi-karlsson/tap/pnop
 
-pnop +setup -c work --vault=MyVault --item="My item" --field=MyField</code></pre>
+pnop +setup -c work --command 'op read "op://Employee/npm/token"'</code></pre>
 
-        <p>The cask pulls in <code>1password-cli</code> too. The field's value can be a bare token or a whole <code>//registry.npmjs.org/:_authToken=&lt;token&gt;</code> line.</p>
+        <p>Anything that prints a token on stdout works, so pnop needs to know nothing about where you keep one. Mine is in 1Password. A keychain lookup or <code>vault kv get</code> would do as well. The output can be a bare token or a whole <code>//registry.npmjs.org/:_authToken=&lt;token&gt;</code> line.</p>
+
+        <p>The command runs through <code>sh</code>, with stdin and stderr wired to your terminal so a biometric prompt still works. That does mean the config file gets executed rather than read. It's yours and mode 0600, the same trust you already extend a shell rc, but it's code and worth knowing that.</p>
 
         <p>pnop's own commands carry a <code>+</code>: <code>+setup</code>, <code>+refresh</code>, <code>+version</code>, <code>+help</code>. Everything without one belongs to pnpm. pnpm has a <code>setup</code> of its own, and a repo script named <code>refresh</code> stays reachable as plain <code>pnpm refresh</code>.</p>
 
@@ -68,11 +70,11 @@ pnop +setup -c work --vault=MyVault --item="My item" --field=MyField</code></pre
 
         <p>You can define more than one config and switch between them, which I use for work and personal registries:</p>
 
-        <pre><code class="language-sh">pnop +setup -c personal --vault=MyOtherVault --item="My other item" --field=MyField
+        <pre><code class="language-sh">pnop +setup -c personal --command 'op read "op://Personal/npm/token"'
 pnop +setup -c personal   # switch
 pnop +setup -c work       # switch back</code></pre>
 
-        <p>Switching rewrites the npmrc with that config's token. When I want the token rewritten from the vault without waiting for something to fail, <code>pnop +refresh</code> does it on demand.</p>
+        <p>Switching rewrites the npmrc with that config's token. When I want it rewritten without waiting for something to fail, <code>pnop +refresh</code> reruns the command on demand.</p>
 
         <p>Then in my shell config:</p>
 
